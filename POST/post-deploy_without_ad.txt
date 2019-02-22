@@ -1,0 +1,84 @@
+############################################################
+# Create testing environment in the overcloud from the director
+unset OS_PASSWORD OS_AUTH_URL OS_USERNAME OS_TENANT_NAME OS_NO_CACHE OS_IDENTITY_API_VERSION OS_PROJECT_DOMAIN_NAME OS_USER_DOMAIN_NAME
+source /home/stack/overcloudrc 
+
+# Create external network on VLAN 5
+neutron net-create public --router:external --provider:physical_network datacentre --provider:network_type vlan --provider:segmentation_id 5
+neutron subnet-create --name public --enable_dhcp=False --allocation-pool=start=192.168.1.50,end=192.168.1.99 --gateway=192.168.0.1 public 192.168.0.0/23
+
+#openstack network create --provider-network-type vlan --provider-physical-network provider --provider-segment 400 400net
+#openstack subnet create 400subnet --network 400net --dhcp --allocation-pool start=192.168.40.100,end=192.168.40.200 --dns-nameserver 192.168.1.249 --subnet-range 192.168.40.0/24
+
+
+############################################################
+unset OS_PASSWORD OS_AUTH_URL OS_USERNAME OS_TENANT_NAME OS_NO_CACHE OS_IDENTITY_API_VERSION OS_PROJECT_DOMAIN_NAME OS_USER_DOMAIN_NAME
+
+# Create testing environment in the overcloud from the director
+source overcloudrc 
+
+# Create admin tenant network and router
+openstack network create admin-net
+openstack subnet create --subnet-range 192.168.100.0/24 --allocation-pool start=192.168.100.100,end=192.168.100.150 --dhcp --ip-version 4 --network admin-net --dns-nameserver 192.168.0.250 admin-subnet
+openstack router create admin-router
+openstack router add subnet admin-router admin-subnet
+neutron router-gateway-set admin-router public
+
+# create a glance image for deployment
+#sudo yum -y install rhel-guest-image-7
+#sudo yum -y install wget
+cd ~/images
+# openstack image create --public --container-format bare --disk-format qcow2 --file /usr/share/rhel-guest-image-7/rhel-guest-image-7.2-20160302.0.x86_64.qcow2 rhel-7.2
+# openstack image create --public --container-format bare --disk-format qcow2 --file ~/images/cirros-0.4.0-x86_64-disk.img cirros
+# openstack image create --public --container-format bare --disk-format raw --file images/windows_server_2012_r2_standard_eval_kvm_20151021.raw win2k12svr
+# cp /usr/share/rhel-guest-image-7/rhel-guest-image-7.2-20160302.0.x86_64.qcow2 ~/images/rhel-server-7.6-x86_64-kvm.qcow2
+# virt-customize -a ~/images/rhel72.qcow2 --copy-in /etc/yum.repos.d/local.repo:/etc/yum.repos.d/
+# virt-customize -a ~/images/rhel72.qcow2 --run-command 'yum -y install qemu-guest-agent'
+# virt-customize -a ~/images/rhel72.qcow2 --root-password password:Redhat01
+openstack image create --public --container-format bare --disk-format qcow2 --property hw_disk_bus=scsi --property hw_scsi_model=virtio-scsi --property hw_qemu_guest_agent=yes --file ~/images/rhel76.qcow2 rhel76
+#openstack image create --public --container-format bare --disk-format qcow2 --property hw_disk_bus=scsi --property hw_scsi_model=virtio-scsi --property hw_qemu_guest_agent=yes --file ~/images/centos7.qcow2 centos
+
+
+
+# add your ssh keypair to nova
+openstack keypair create --public-key ~/.ssh/id_rsa.pub stack-director-keypair
+
+# Create Host Availability Zones - Host Aggregates
+#openstack aggregate create --zone Compute Compute
+openstack aggregate create --zone HCI HCI
+#openstack aggregate add host Compute compute1.lab.lan
+openstack aggregate add host HCI hci1.lab.lan
+openstack aggregate add host HCI hci2.lab.lan
+openstack aggregate add host HCI hci3.lab.lan
+openstack aggregate add host HCI hci4.lab.lan
+
+# create some instances
+openstack flavor create --id auto --ram 1024 --disk 10 --vcpu 1 small
+openstack flavor create --id auto --ram 2048 --disk 20 --vcpu 2 medium
+openstack flavor create --id auto --ram 4096 --disk 40 --vcpu 4 large
+
+admin_net=$(openstack network list | grep -i admin | awk '{print $2;}')
+admin_project=$(openstack project list| grep -i admin | awk '{print $2;}')
+admin_security_group=$(openstack security group list | grep $admin_project| awk '{print $2;}')
+openstack server create --flavor small --image rhel76 --security-group $admin_security_group --key-name stack-director-keypair --nic net-id=$admin_net --availability-zone HCI admin-test1
+#openstack server create --flavor tiny --image cirros --security-group $admin_security_group --key-name stack-director-keypair --nic net-id=$admin_net admin-test2
+#openstack server create --flavor large --image win2k12svr --security-group default --key-name stack-director-keypair --nic net-id=$admin_net windoze
+
+# allow ssh, http and icmp to the demo tenant network
+admin_project=$(openstack project list| grep -i admin | awk '{print $2;}')
+admin_security_group=$(openstack security group list | grep $admin_project| awk '{print $2;}')
+openstack security group rule create --protocol tcp --dst-port 22:22 $admin_security_group
+openstack security group rule create --protocol tcp --dst-port 80:80 $admin_security_group
+openstack security group rule create --protocol tcp --dst-port 443:443 $admin_security_group
+openstack security group rule create --protocol icmp  $admin_security_group
+
+
+# Wait a few seconds for instance to boot
+sleep 10
+echo "waiting for 10 seconds while instance boot"
+
+# create a floating private IP
+openstack floating ip create public
+floating_ip=$(openstack floating ip list|grep 192.168.1. |awk '{print $4;}')
+openstack server add floating ip admin-test1 $floating_ip
+
